@@ -9,8 +9,11 @@ import { Modal, Button, Input } from "@/shared/components";
  * Auto-detect and import token from Cursor IDE's local SQLite database
  */
 export default function CursorAuthModal({ isOpen, onSuccess, onClose }) {
+  const [importMode, setImportMode] = useState("single"); // single | bulk
   const [accessToken, setAccessToken] = useState("");
   const [machineId, setMachineId] = useState("");
+  const [bulkText, setBulkText] = useState("");
+  const [continueOnError, setContinueOnError] = useState(true);
   const [error, setError] = useState(null);
   const [importing, setImporting] = useState(false);
   const [autoDetecting, setAutoDetecting] = useState(false);
@@ -45,8 +48,11 @@ export default function CursorAuthModal({ isOpen, onSuccess, onClose }) {
 
   // Auto-detect tokens when modal opens
   useEffect(() => {
-    if (!isOpen) return;
-    runAutoDetect();
+    if (!isOpen) return undefined;
+    const timer = window.setTimeout(() => {
+      runAutoDetect();
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [isOpen]);
 
   const handleImportToken = async () => {
@@ -79,6 +85,51 @@ export default function CursorAuthModal({ isOpen, onSuccess, onClose }) {
         throw new Error(data.error || "Import failed");
       }
 
+      onSuccess?.();
+      onClose();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleBulkImport = async () => {
+    const lines = bulkText
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (lines.length === 0) {
+      setError("Please paste at least one line in bulk format");
+      return;
+    }
+
+    const imports = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const parts = line.split(",").map((p) => p.trim());
+      if (parts.length < 2 || !parts[0] || !parts[1]) {
+        setError(`Line ${i + 1} is invalid. Use: accessToken,machineId`);
+        return;
+      }
+      imports.push({ accessToken: parts[0], machineId: parts[1] });
+    }
+
+    setImporting(true);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/oauth/cursor/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imports, continueOnError }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Bulk import failed");
+      if (!data.successCount || data.successCount < 1) {
+        throw new Error("No valid tokens were imported");
+      }
       onSuccess?.();
       onClose();
     } catch (err) {
@@ -152,31 +203,81 @@ export default function CursorAuthModal({ isOpen, onSuccess, onClose }) {
             )}
 
             {/* Access Token Input */}
-            <div>
-              <label className="block text-sm font-medium mb-2">
-                Access Token <span className="text-red-500">*</span>
-              </label>
-              <textarea
-                value={accessToken}
-                onChange={(e) => setAccessToken(e.target.value)}
-                placeholder="Access token will be auto-filled..."
-                rows={3}
-                className="w-full px-3 py-2 text-sm font-mono border border-border rounded-lg bg-background focus:outline-none focus:border-primary resize-none"
-              />
+            <div className="rounded-lg border border-border p-1 bg-surface">
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  onClick={() => setImportMode("single")}
+                  className={`flex-1 rounded-md px-2 py-1 text-xs font-medium ${importMode === "single" ? "bg-primary text-white" : "text-text-muted hover:bg-black/5 dark:hover:bg-white/5"}`}
+                >
+                  Single
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setImportMode("bulk")}
+                  className={`flex-1 rounded-md px-2 py-1 text-xs font-medium ${importMode === "bulk" ? "bg-primary text-white" : "text-text-muted hover:bg-black/5 dark:hover:bg-white/5"}`}
+                >
+                  Bulk
+                </button>
+              </div>
             </div>
 
-            {/* Machine ID Input */}
-            <div>
-              <label className="block text-sm font-medium mb-2">
-                Machine ID <span className="text-red-500">*</span>
-              </label>
-              <Input
-                value={machineId}
-                onChange={(e) => setMachineId(e.target.value)}
-                placeholder="Machine ID will be auto-filled..."
-                className="font-mono text-sm"
-              />
-            </div>
+            {importMode === "single" ? (
+              <>
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    Access Token <span className="text-red-500">*</span>
+                  </label>
+                  <textarea
+                    value={accessToken}
+                    onChange={(e) => setAccessToken(e.target.value)}
+                    placeholder="Access token will be auto-filled..."
+                    rows={3}
+                    className="w-full px-3 py-2 text-sm font-mono border border-border rounded-lg bg-background focus:outline-none focus:border-primary resize-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    Machine ID <span className="text-red-500">*</span>
+                  </label>
+                  <Input
+                    value={machineId}
+                    onChange={(e) => setMachineId(e.target.value)}
+                    placeholder="Machine ID will be auto-filled..."
+                    className="font-mono text-sm"
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    Bulk Lines <span className="text-red-500">*</span>
+                  </label>
+                  <textarea
+                    value={bulkText}
+                    onChange={(e) => setBulkText(e.target.value)}
+                    placeholder={"One per line:\n<accessToken>,<machineId>"}
+                    rows={7}
+                    className="w-full px-3 py-2 text-xs font-mono border border-border rounded-lg bg-background focus:outline-none focus:border-primary resize-y"
+                  />
+                  <p className="mt-1 text-[11px] text-text-muted">
+                    Format: accessToken,machineId (one pair per line)
+                  </p>
+                </div>
+
+                <label className="flex items-center gap-2 text-xs text-text-muted">
+                  <input
+                    type="checkbox"
+                    checked={continueOnError}
+                    onChange={(e) => setContinueOnError(e.target.checked)}
+                    className="size-3.5 accent-primary"
+                  />
+                  Continue importing when some lines are invalid
+                </label>
+              </>
+            )}
 
             {/* Error Display */}
             {error && (
@@ -188,11 +289,14 @@ export default function CursorAuthModal({ isOpen, onSuccess, onClose }) {
             {/* Action Buttons */}
             <div className="flex gap-2">
               <Button
-                onClick={handleImportToken}
+                onClick={importMode === "single" ? handleImportToken : handleBulkImport}
                 fullWidth
-                disabled={importing || !accessToken.trim() || !machineId.trim()}
+                disabled={
+                  importing
+                  || (importMode === "single" ? (!accessToken.trim() || !machineId.trim()) : !bulkText.trim())
+                }
               >
-                {importing ? "Importing..." : "Import Token"}
+                {importing ? "Importing..." : importMode === "single" ? "Import Token" : "Bulk Import"}
               </Button>
               <Button onClick={onClose} variant="ghost" fullWidth>
                 Cancel
