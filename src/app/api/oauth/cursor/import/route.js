@@ -12,58 +12,80 @@ import { createProviderConnection } from "@/models";
  */
 export async function POST(request) {
   try {
-    const { accessToken, machineId } = await request.json();
-
-    if (!accessToken || typeof accessToken !== "string") {
-      return NextResponse.json(
-        { error: "Access token is required" },
-        { status: 400 }
-      );
-    }
-
-    if (!machineId || typeof machineId !== "string") {
-      return NextResponse.json(
-        { error: "Machine ID is required" },
-        { status: 400 }
-      );
-    }
-
+    const payload = await request.json();
     const cursorService = new CursorService();
+    const importOne = async ({ accessToken, machineId }) => {
+      if (!accessToken || typeof accessToken !== "string") {
+        throw new Error("Access token is required");
+      }
+      if (!machineId || typeof machineId !== "string") {
+        throw new Error("Machine ID is required");
+      }
 
-    // Validate token by making API call
-    const tokenData = await cursorService.validateImportToken(
-      accessToken.trim(),
-      machineId.trim()
-    );
-
-    // Try to extract user info from token
-    const userInfo = cursorService.extractUserInfo(tokenData.accessToken);
-
-    // Save to database
-    const connection = await createProviderConnection({
-      provider: "cursor",
-      authType: "oauth",
-      accessToken: tokenData.accessToken,
-      refreshToken: null, // Cursor doesn't have public refresh endpoint
-      expiresAt: new Date(Date.now() + tokenData.expiresIn * 1000).toISOString(),
-      email: userInfo?.email || null,
-      providerSpecificData: {
-        machineId: tokenData.machineId,
-        authMethod: "imported",
-        provider: "Imported",
-        userId: userInfo?.userId,
-      },
-      testStatus: "active",
-    });
-
-    return NextResponse.json({
-      success: true,
-      connection: {
+      const tokenData = await cursorService.validateImportToken(
+        accessToken.trim(),
+        machineId.trim()
+      );
+      const userInfo = cursorService.extractUserInfo(tokenData.accessToken);
+      const connection = await createProviderConnection({
+        provider: "cursor",
+        authType: "oauth",
+        accessToken: tokenData.accessToken,
+        refreshToken: null, // Cursor doesn't have public refresh endpoint
+        expiresAt: new Date(Date.now() + tokenData.expiresIn * 1000).toISOString(),
+        email: userInfo?.email || null,
+        providerSpecificData: {
+          machineId: tokenData.machineId,
+          authMethod: "imported",
+          provider: "Imported",
+          userId: userInfo?.userId,
+        },
+        testStatus: "active",
+      });
+      return {
         id: connection.id,
         provider: connection.provider,
         email: connection.email,
-      },
-    });
+      };
+    };
+
+    // Bulk import mode
+    if (Array.isArray(payload?.imports)) {
+      const results = [];
+      for (let i = 0; i < payload.imports.length; i++) {
+        const item = payload.imports[i];
+        try {
+          const connection = await importOne(item || {});
+          results.push({ index: i, success: true, connection });
+        } catch (error) {
+          results.push({ index: i, success: false, error: error.message });
+          if (payload?.continueOnError === false) {
+            return NextResponse.json(
+              {
+                success: false,
+                error: `Import failed at index ${i}: ${error.message}`,
+                results,
+              },
+              { status: 400 }
+            );
+          }
+        }
+      }
+
+      const successCount = results.filter((r) => r.success).length;
+      return NextResponse.json({
+        success: successCount > 0,
+        mode: "bulk",
+        total: results.length,
+        successCount,
+        failedCount: results.length - successCount,
+        results,
+      });
+    }
+
+    // Single import mode (backward-compatible)
+    const connection = await importOne(payload || {});
+    return NextResponse.json({ success: true, connection });
   } catch (error) {
     console.log("Cursor import token error:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });
@@ -96,5 +118,21 @@ export async function GET() {
         type: "text",
       },
     ],
+    bulkImport: {
+      supported: true,
+      requestExample: {
+        imports: [
+          {
+            accessToken: "<cursor_access_token_1>",
+            machineId: "<machine_id_1>",
+          },
+          {
+            accessToken: "<cursor_access_token_2>",
+            machineId: "<machine_id_2>",
+          },
+        ],
+        continueOnError: true,
+      },
+    },
   });
 }
